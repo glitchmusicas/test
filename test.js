@@ -1,7 +1,7 @@
 // ==SE_module==
-// name: Snapchatopener
-// displayName: Snapchatopener
-// description: A script that opens all snaps INSTANTLY
+// name: snapchatopener
+// displayName: snapchatopener
+// description: a script that opens all snaps INSTANTLY
 // version: 1.0
 // author: jxyytf
 // ==/SE_module==
