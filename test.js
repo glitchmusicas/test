@@ -6,124 +6,75 @@
 // author: jxyytf
 // ==/SE_module==
 
-package me.rhunk.snapenhance.core.features.impl.experiments
-
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.launch
-import me.rhunk.snapenhance.common.data.ContentType
-import me.rhunk.snapenhance.common.data.MessageUpdate
-import me.rhunk.snapenhance.common.data.MessagingRuleType
-import me.rhunk.snapenhance.core.event.events.impl.BuildMessageEvent
-import me.rhunk.snapenhance.core.features.MessagingRuleFeature
-import me.rhunk.snapenhance.core.features.impl.messaging.Messaging
-import java.util.concurrent.atomic.AtomicInteger
-import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
-import kotlin.random.Random
-
-class AutoOpenSnaps: MessagingRuleFeature("Auto Open Snaps", MessagingRuleType.AUTO_OPEN_SNAPS) {
-    private val snapQueue = MutableSharedFlow<Pair<String, Long>>()
-    private var snapQueueSize = AtomicInteger(0)
-    private val openedSnaps = mutableListOf<Long>()
-
-    private val notificationManager by lazy {
-        context.androidContext.getSystemService(NotificationManager::class.java)
+class AutoOpenSnaps {
+    constructor(context) {
+        this.context = context;
+        this.snapQueue = [];
+        this.snapQueueSize = 0;
+        this.openedSnaps = new Set();
+        this.notificationId = Math.floor(Math.random() * 100000);
+        this.init();
     }
 
-    private val notificationId by lazy { Random.nextInt() }
+    sendStatusNotification(count) {
+        console.log(`Auto Open Snaps: ${count} snaps opened.`);
+    }
 
-    private val channelId by lazy {
-        "auto_open_snaps".also {
-            notificationManager.createNotificationChannel(
-                NotificationChannel(it, context.translation["auto_open_snaps.title"], NotificationManager.IMPORTANCE_LOW)
-            )
+    async processQueue() {
+        while (this.snapQueue.length > 0) {
+            let { conversationId, messageId } = this.snapQueue.shift();
+            this.snapQueueSize--;
+            await new Promise(res => setTimeout(res, Math.random() * 50 + 50));
+            
+            let result = null;
+            for (let i = 0; i < 5; i++) {
+                if (!this.context.messaging.conversationManager) {
+                    await new Promise(res => setTimeout(res, 0));
+                    continue;
+                }
+
+                result = await this.context.messaging.conversationManager.updateMessage(conversationId, messageId, "READ");
+                
+                if (result && result !== "DUPLICATEREQUEST") {
+                    console.warn("Failed to mark snap as read, retrying...");
+                    await new Promise(res => setTimeout(res, 3000));
+                    continue;
+                }
+                break;
+            }
+
+            if (this.snapQueueSize <= 5) {
+                this.openedSnaps.clear();
+            } else {
+                this.sendStatusNotification(this.openedSnaps.size);
+            }
         }
     }
 
-    private fun sendStatusNotification(count: Int) {
-        notificationManager.notify(
-            notificationId,
-            Notification.Builder(context.androidContext, channelId)
-                .setContentTitle(context.translation["auto_open_snaps.title"])
-                .setContentText(context.translation.format("auto_open_snaps.notification_content", "count" to count.toString()))
-                .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setProgress(0, 0, true)
-                .build().apply {
-                    flags = flags or Notification.FLAG_ONLY_ALERT_ONCE
-                }
-        )
-    }
+    init() {
+        this.context.event.subscribe("BuildMessageEvent", (event) => {
+            if (event.message.senderId?.toString() === this.context.database.myUserId) return;
+            let conversationId = event.message.messageDescriptor?.conversationId?.toString();
+            let messageId = event.message.messageDescriptor?.messageId;
 
-    override fun init() {
-        if (getRuleState() == null) return
-        val messaging = context.feature(Messaging::class)
-
-        context.coroutineScope.launch(start = CoroutineStart.UNDISPATCHED) {
-            snapQueue.collect { (conversationId, messageId) ->
-                snapQueueSize.addAndGet(-1)
-                delay(Random.nextLong(50, 100))
-                var result: String?
-
-                for (i in 0..5) {
-                    while (context.isMainActivityPaused || messaging.conversationManager == null) {
-                        delay(0)
-                    }
-
-                    result = suspendCoroutine { continuation ->
-                        runCatching {
-                            messaging.conversationManager?.updateMessage(conversationId, messageId, MessageUpdate.READ) { result ->
-                                continuation.resume(result)
-                            }
-                        }.getOrNull() ?: continuation.resume("ConversationManager is null")
-                    }
-
-                    if (result != null && result != "DUPLICATEREQUEST") {
-                        context.log.warn("Failed to mark snap as read, retrying in 3 second")
-                        delay(0)
-                        continue
-                    }
-                    break
-                }
-
-                if (snapQueueSize.get() <= 5) {
-                    notificationManager.cancel(notificationId)
-                    synchronized(openedSnaps) {
-                        openedSnaps.clear()
-                    }
-                } else {
-                    sendStatusNotification(openedSnaps.size)
-                }
-            }
-        }
-
-        context.event.subscribe(BuildMessageEvent::class, priority = 103) { event ->
-            if (event.message.senderId?.toString() == context.database.myUserId) return@subscribe
-            val conversationId = event.message.messageDescriptor?.conversationId?.toString() ?: return@subscribe
-            val clientMessageId = event.message.messageDescriptor?.messageId ?: return@subscribe
-
-            if (
-                event.message.messageContent?.contentType != ContentType.SNAP ||
-                event.message.messageMetadata?.openedBy?.any { it.toString() == context.database.myUserId } == true
-            ) {
-                return@subscribe
+            if (!conversationId || !messageId || 
+                event.message.messageContent?.contentType !== "SNAP" || 
+                event.message.messageMetadata?.openedBy?.includes(this.context.database.myUserId)) {
+                return;
             }
 
-            context.coroutineScope.launch {
-                if (!canUseRule(conversationId)) return@launch
-                synchronized(openedSnaps) {
-                    if (openedSnaps.contains(clientMessageId)) {
-                        return@launch
-                    }
-                    openedSnaps.add(clientMessageId)
-                }
-                snapQueueSize.addAndGet(1)
-                snapQueue.emit(conversationId to clientMessageId)
-            }
-        }
+            if (this.openedSnaps.has(messageId)) return;
+            this.openedSnaps.add(messageId);
+            this.snapQueueSize++;
+            this.snapQueue.push({ conversationId, messageId });
+            this.processQueue();
+        });
     }
 }
+
+// Usage example
+const autoOpener = new AutoOpenSnaps({
+    messaging: { conversationManager: { updateMessage: async (cid, mid, status) => "DUPLICATEREQUEST" } },
+    event: { subscribe: (event, callback) => console.log(`Subscribed to ${event}`) },
+    database: { myUserId: "12345" }
+});
